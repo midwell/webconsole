@@ -123,7 +123,17 @@ func normalizeApplicationFilteringRules(slice *configmodels.Slice) {
 		dl := convertToBps(int64(rule.AppMbrDownlink), rule.BitrateUnit)
 		rule.AppMbrDownlink = convertBitrateToInt32(dl)
 
+		// The guaranteed rates are expressed in the same unit and must be normalised the same way.
+		// Left unconverted they would be stored raw, so a rule configured in Mbps would reach the
+		// PCF a million times too small.
+		gbrUl := convertToBps(int64(rule.AppGbrUplink), rule.BitrateUnit)
+		rule.AppGbrUplink = convertBitrateToInt32(gbrUl)
+
+		gbrDl := convertToBps(int64(rule.AppGbrDownlink), rule.BitrateUnit)
+		rule.AppGbrDownlink = convertBitrateToInt32(gbrDl)
+
 		logger.ConfigLog.Infof("Normalized MBR Uplink: %v, Downlink: %v", rule.AppMbrUplink, rule.AppMbrDownlink)
+		logger.ConfigLog.Infof("Normalized GBR Uplink: %v, Downlink: %v", rule.AppGbrUplink, rule.AppGbrDownlink)
 		if rule.TrafficClass != nil {
 			logger.ConfigLog.Infof("Traffic class: %v", rule.TrafficClass)
 		}
