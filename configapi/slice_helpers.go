@@ -155,6 +155,12 @@ func normalizeApplicationFilteringRules(slice *configmodels.Slice) {
 		gbrDl := convertToBps(int64(rule.AppGbrDownlink), rule.BitrateUnit)
 		rule.AppGbrDownlink = convertBitrateToInt32(gbrDl)
 
+		// Every rate on the rule is bps from here on, so the unit has to say so. A GET returns the
+		// stored rule, and returning the operator's original unit beside a normalised value both
+		// contradicts the field description and multiplies the rates again if that document is
+		// posted back.
+		rule.BitrateUnit = bitrateUnitBps
+
 		logger.ConfigLog.Infof("Normalized MBR Uplink: %d, Downlink: %d", rule.AppMbrUplink, rule.AppMbrDownlink)
 		logger.ConfigLog.Infof("Normalized GBR Uplink: %d, Downlink: %d", rule.AppGbrUplink, rule.AppGbrDownlink)
 		if rule.TrafficClass != nil {

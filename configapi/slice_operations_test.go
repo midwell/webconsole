@@ -796,9 +796,32 @@ func TestNetworkSlicePostHandler_BitrateValidation(t *testing.T) {
 			if tc.expectedCode != w.Code {
 				t.Errorf("expected `%v`, got `%v`", tc.expectedCode, w.Code)
 			}
-			if !strings.Contains(w.Body.String(), tc.expectedError) {
+			if tc.expectedError != "" && !strings.Contains(w.Body.String(), tc.expectedError) {
 				t.Errorf("expected body to contain error about `%v`, got `%v`", tc.expectedError, w.Body.String())
 			}
 		})
+	}
+}
+
+// A GET returns the stored rule, so the unit has to describe the stored value. The property that
+// matters is idempotence: posting back what a GET returned must not multiply the rates again.
+func TestNormalizeRewritesTheUnitToTheStoredOne(t *testing.T) {
+	slice := &configmodels.Slice{
+		ApplicationFilteringRules: []configmodels.SliceApplicationFilteringRules{
+			filteringRuleWithRates(bitrateUnitMbps, 50, 50, 10, 20),
+		},
+	}
+
+	normalizeApplicationFilteringRules(slice)
+
+	if got := slice.ApplicationFilteringRules[0].BitrateUnit; got != bitrateUnitBps {
+		t.Errorf("BitrateUnit = %q, want %q once the rates are bps", got, bitrateUnitBps)
+	}
+
+	normalizeApplicationFilteringRules(slice)
+
+	rule := slice.ApplicationFilteringRules[0]
+	if rule.AppMbrUplink != 50_000_000 || rule.AppGbrUplink != 10_000_000 {
+		t.Errorf("normalising the stored rule again changed it: MBR %d, GBR %d", rule.AppMbrUplink, rule.AppGbrUplink)
 	}
 }
