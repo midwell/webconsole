@@ -88,12 +88,35 @@ func parseAndValidateSliceRequest(c *gin.Context, sliceName string) (configmodel
 			logger.ConfigLog.Errorln("TrafficClass (QCI, ARP) required but not provided, network slice NOT configured in the network")
 			return request, fmt.Errorf("TrafficClass (QCI, ARP) required but not provided, network slice NOT configured in the network")
 		}
+		if err := validateRuleBitrates(ruleConfig, sliceName); err != nil {
+			return request, err
+		}
 	}
 
 	slices.Sort(request.SiteDeviceGroup)
 	request.SiteDeviceGroup = slices.Compact(request.SiteDeviceGroup)
 
 	return request, nil
+}
+
+// A rate that isValidBitrate rejects is one that cannot be served as configured, so the slice is
+// refused rather than accepted with a rate the operator never asked for.
+func validateRuleBitrates(rule configmodels.SliceApplicationFilteringRules, sliceName string) error {
+	rates := []struct {
+		name  string
+		value int32
+	}{
+		{"app-mbr-uplink", rule.AppMbrUplink},
+		{"app-mbr-downlink", rule.AppMbrDownlink},
+		{"app-gbr-uplink", rule.AppGbrUplink},
+		{"app-gbr-downlink", rule.AppGbrDownlink},
+	}
+	for _, rate := range rates {
+		if !isValidBitrate(rate.value, rule.BitrateUnit) {
+			return fmt.Errorf("invalid %s %d %q for rule %s in Network Slice %s", rate.name, rate.value, rule.BitrateUnit, rule.RuleName, sliceName)
+		}
+	}
+	return nil
 }
 
 func logSliceMetadata(slice configmodels.Slice) {
@@ -132,8 +155,8 @@ func normalizeApplicationFilteringRules(slice *configmodels.Slice) {
 		gbrDl := convertToBps(int64(rule.AppGbrDownlink), rule.BitrateUnit)
 		rule.AppGbrDownlink = convertBitrateToInt32(gbrDl)
 
-		logger.ConfigLog.Infof("Normalized MBR Uplink: %v, Downlink: %v", rule.AppMbrUplink, rule.AppMbrDownlink)
-		logger.ConfigLog.Infof("Normalized GBR Uplink: %v, Downlink: %v", rule.AppGbrUplink, rule.AppGbrDownlink)
+		logger.ConfigLog.Infof("Normalized MBR Uplink: %d, Downlink: %d", rule.AppMbrUplink, rule.AppMbrDownlink)
+		logger.ConfigLog.Infof("Normalized GBR Uplink: %d, Downlink: %d", rule.AppGbrUplink, rule.AppGbrDownlink)
 		if rule.TrafficClass != nil {
 			logger.ConfigLog.Infof("Traffic class: %v", rule.TrafficClass)
 		}
@@ -141,7 +164,12 @@ func normalizeApplicationFilteringRules(slice *configmodels.Slice) {
 }
 
 func convertBitrateToInt32(bitrate int64) int32 {
-	if bitrate < 0 || bitrate > math.MaxInt32 {
+	if bitrate < 0 {
+		logger.ConfigLog.Warnf("negative bitrate %d bps stored as 0", bitrate)
+		return 0
+	}
+	if bitrate > math.MaxInt32 {
+		logger.ConfigLog.Warnf("bitrate %d bps exceeds the largest rate that can be stored, capped at %d bps", bitrate, int64(math.MaxInt32))
 		return math.MaxInt32
 	}
 	return int32(bitrate)

@@ -4,6 +4,7 @@
 package configapi
 
 import (
+	"math"
 	"regexp"
 	"strconv"
 )
@@ -39,4 +40,18 @@ func isValidUpfPort(port string) bool {
 
 func isValidGnbTac(tac int32) bool {
 	return tac >= 1 && tac <= 16777215
+}
+
+// A rate is normalised to bps and stored in a signed 32-bit field, so a negative rate is not a
+// rate at all and one that does not fit the field cannot be served as configured. An unset rate
+// needs no conversion, so the validator does not add a default-unit warning for a rate the rule
+// leaves out.
+func isValidBitrate(value int32, unit string) bool {
+	if value < 0 {
+		return false
+	}
+	if value == 0 {
+		return true
+	}
+	return convertToBps(int64(value), unit) <= math.MaxInt32
 }

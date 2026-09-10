@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -31,6 +32,7 @@ import (
 const (
 	testSliceName   = "slice1"
 	bitrateUnitMbps = "Mbps"
+	bitrateUnitGbps = "Gbps"
 )
 
 var execCommandTimesCalled = 0
@@ -668,5 +670,135 @@ func TestUpdateSmProvisionedData_UsesPutOne(t *testing.T) {
 	}
 	if _, ok = data["dnnconfigurations"]; !ok {
 		t.Fatal("expected dnnconfigurations key in put payload")
+	}
+}
+
+func filteringRuleWithRates(unit string, mbrUl, mbrDl, gbrUl, gbrDl int32) configmodels.SliceApplicationFilteringRules {
+	return configmodels.SliceApplicationFilteringRules{
+		RuleName:       "rate-rule",
+		BitrateUnit:    unit,
+		AppMbrUplink:   mbrUl,
+		AppMbrDownlink: mbrDl,
+		AppGbrUplink:   gbrUl,
+		AppGbrDownlink: gbrDl,
+		TrafficClass:   &configmodels.TrafficClassInfo{Qci: 9, Arp: 1},
+	}
+}
+
+// Guaranteed rates are configured in the rule's bitrate-unit, like the maximum rates, and must be
+// normalised to bps on the same path. Left unconverted, a rule written in Mbps reaches the PCF a
+// million times too small.
+func TestNormalizeConvertsGuaranteedBitRatesToBps(t *testing.T) {
+	slice := &configmodels.Slice{
+		ApplicationFilteringRules: []configmodels.SliceApplicationFilteringRules{
+			filteringRuleWithRates(bitrateUnitMbps, 50, 50, 10, 20),
+		},
+	}
+
+	normalizeApplicationFilteringRules(slice)
+
+	rule := slice.ApplicationFilteringRules[0]
+	if rule.AppGbrUplink != 10_000_000 {
+		t.Errorf("AppGbrUplink = %d, want 10000000 after normalising 10 Mbps", rule.AppGbrUplink)
+	}
+	if rule.AppGbrDownlink != 20_000_000 {
+		t.Errorf("AppGbrDownlink = %d, want 20000000 after normalising 20 Mbps", rule.AppGbrDownlink)
+	}
+	if rule.AppMbrUplink != 50_000_000 {
+		t.Errorf("AppMbrUplink = %d, want the maximum rates still normalised", rule.AppMbrUplink)
+	}
+}
+
+// A negative rate must not become the largest storable one: an operator who configures -1 must not
+// be served a 2.1 Gbps rate.
+func TestConvertBitrateToInt32(t *testing.T) {
+	testCases := []struct {
+		name     string
+		bitrate  int64
+		expected int32
+	}{
+		{"unset", 0, 0},
+		{"within the field", 10_000_000, 10_000_000},
+		{"negative is not a rate", -1, 0},
+		{"beyond the field is capped", math.MaxInt32 + 1, math.MaxInt32},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := convertBitrateToInt32(tc.bitrate); got != tc.expected {
+				t.Errorf("convertBitrateToInt32(%d) = %d, want %d", tc.bitrate, got, tc.expected)
+			}
+		})
+	}
+}
+
+// A rate that is negative, or too large for the field it is stored in, cannot be served as
+// configured, so the slice is rejected rather than accepted with a different rate than was asked
+// for.
+func TestNetworkSlicePostHandler_BitrateValidation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.Default()
+	AddConfigV1Service(router)
+
+	testCases := []struct {
+		name          string
+		rule          configmodels.SliceApplicationFilteringRules
+		expectedCode  int
+		expectedError string
+	}{
+		{
+			name:          "negative maximum bit rate",
+			rule:          filteringRuleWithRates(bitrateUnitMbps, -1, 10, 0, 0),
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "invalid app-mbr-uplink",
+		},
+		{
+			name:          "negative guaranteed bit rate",
+			rule:          filteringRuleWithRates(bitrateUnitMbps, 10, 10, 0, -5),
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "invalid app-gbr-downlink",
+		},
+		{
+			name:          "guaranteed bit rate too large to store",
+			rule:          filteringRuleWithRates(bitrateUnitGbps, 2, 2, 3, 0),
+			expectedCode:  http.StatusBadRequest,
+			expectedError: "invalid app-gbr-uplink",
+		},
+		{
+			name:         "rates that fit are accepted",
+			rule:         filteringRuleWithRates(bitrateUnitGbps, 2, 2, 1, 1),
+			expectedCode: http.StatusOK,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			originalDBClient := dbadapter.CommonDBClient
+			defer func() { dbadapter.CommonDBClient = originalDBClient }()
+			// Installed for every case, not only the accepted one: without it a rejected rate that
+			// slipped through would fail this test with a 500 from the nil client rather than the
+			// 200 that is the defect.
+			dbadapter.CommonDBClient = &NetworkSliceMockDBClient{}
+			slice := networkSlice(testSliceName)
+			slice.ApplicationFilteringRules = []configmodels.SliceApplicationFilteringRules{tc.rule}
+			jsonBody, err := json.Marshal(slice)
+			if err != nil {
+				t.Fatalf("failed to marshal network slice %v", err)
+			}
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, "/config/v1/network-slice/"+testSliceName, bytes.NewReader(jsonBody))
+			if err != nil {
+				t.Fatalf("failed to create request: %v", err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			router.ServeHTTP(w, req)
+			if tc.expectedCode != w.Code {
+				t.Errorf("expected `%v`, got `%v`", tc.expectedCode, w.Code)
+			}
+			if !strings.Contains(w.Body.String(), tc.expectedError) {
+				t.Errorf("expected body to contain error about `%v`, got `%v`", tc.expectedError, w.Body.String())
+			}
+		})
 	}
 }
